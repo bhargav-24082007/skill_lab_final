@@ -1,0 +1,22 @@
+{
+  "name": "connect-four-server",
+  "version": "1.0.0",
+  "description": "Connect Four backend: Express + Socket.IO + MongoDB",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "test": "node --test ../tests/gameLogic.test.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "mongodb": "^6.8.0",
+    "socket.io": "^4.7.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}
