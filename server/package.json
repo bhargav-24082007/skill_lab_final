@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node index.js",
     "dev": "node --watch index.js",
-    "test": "node --test ../tests/gameLogic.test.js"
+    "test": "node --test ../tests/gameLogic.test.js ../tests/socketEvents.test.js",
+    "test:logic": "node --test ../tests/gameLogic.test.js",
+    "test:socket": "node --test ../tests/socketEvents.test.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
@@ -18,5 +20,8 @@
   "engines": {
     "node": ">=18.0.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "socket.io-client": "^4.8.4"
+  }
 }

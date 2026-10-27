@@ -1,0 +1,17 @@
+{
+  "name": "connect-four-online",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Two-player online Connect Four game — college project",
+  "type": "commonjs",
+  "scripts": {
+    "start:server": "node server/index.js",
+    "start:client": "npm --prefix client run dev",
+    "test": "node --test tests/gameLogic.test.js tests/socketEvents.test.js tests/matchHistory.test.js",
+    "test:logic": "node --test tests/gameLogic.test.js",
+    "test:socket": "node --test tests/socketEvents.test.js"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.4"
+  }
+}
