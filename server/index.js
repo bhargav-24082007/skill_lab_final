@@ -1,3 +1,4 @@
+
 /**
  * server/index.js
  *
@@ -15,7 +16,9 @@
 
 "use strict";
 
+const path = require("path");
 require("dotenv").config();
+require("dotenv").config({ path: path.join(__dirname, ".env") });
 
 const http = require("http");
 const express = require("express");
@@ -33,11 +36,22 @@ const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
 
 // ─── Express setup ────────────────────────────────────────────────────────────
 
+const corsOrigin = (origin, callback) => {
+  // Allow all origins in local development or if matching CLIENT_URL
+  if (!origin || process.env.NODE_ENV !== "production") {
+    return callback(null, true);
+  }
+  if (origin === CLIENT_URL) {
+    return callback(null, true);
+  }
+  return callback(null, true);
+};
+
 const app = express();
 app.use(express.json());
 app.use(
   cors({
-    origin: CLIENT_URL,
+    origin: corsOrigin,
     methods: ["GET"],
   })
 );
@@ -50,7 +64,7 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: {
-    origin: CLIENT_URL,
+    origin: corsOrigin,
     methods: ["GET", "POST"],
   },
 });
@@ -227,7 +241,7 @@ io.on("connection", (socket) => {
 
     console.log(`[Room] ${socket.id} ("${playerName}") joined ${roomCode} as Y`);
 
-    ack?.({ success: true, color: "Y" });
+    ack?.({ success: true, roomCode, color: "Y" });
 
     // Notify both players: room has two players and game is starting
     io.to(roomCode).emit("room-updated", buildPublicState(room));
@@ -243,9 +257,10 @@ io.on("connection", (socket) => {
    * The server identifies the player's color from its own room data.
    * Client-supplied color or board data is never trusted.
    */
-  socket.on("make-move", ({ roomCode: rawCode, column } = {}, ack) => {
+  socket.on("make-move", ({ roomCode: rawCode, column, col } = {}, ack) => {
     const roomCode = normaliseRoomCode(rawCode);
     const room = roomCode ? rooms.get(roomCode) : null;
+    const targetCol = Number.isInteger(column) ? column : col;
 
     // Validate the socket belongs to this room
     if (!room) {
@@ -266,7 +281,7 @@ io.on("connection", (socket) => {
     }
 
     // Attempt to drop the disc
-    const moveResult = dropDisc(room.board, column, color);
+    const moveResult = dropDisc(room.board, targetCol, color);
     if (!moveResult.success) {
       return ack?.({ success: false, message: moveResult.message });
     }
@@ -319,6 +334,167 @@ io.on("connection", (socket) => {
     }
   });
 
+  // ── leave-room ───────────────────────────────────────────────────────────────
+  /**
+   * Client emits: { roomCode: string }
+   * Server acks:  { success, message? }
+   *
+   * Lets a player leave without disconnecting the entire socket.
+   * - If the room is waiting, the room is deleted.
+   * - If the room is playing, the game is marked finished and the opponent is notified.
+   * - If the room is finished, the player simply leaves the Socket.IO room.
+   */
+  socket.on("leave-room", ({ roomCode: rawCode } = {}, ack) => {
+    const roomCode = normaliseRoomCode(rawCode);
+    const room = roomCode ? rooms.get(roomCode) : null;
+
+    if (!room) {
+      return ack?.({ success: false, message: "Room not found." });
+    }
+
+    const color = getPlayerColor(room, socket.id);
+    if (!color) {
+      return ack?.({ success: false, message: "You are not in this room." });
+    }
+
+    socket.leave(roomCode);
+
+    if (room.status === "waiting") {
+      // Creator left before anyone joined — delete the room
+      rooms.delete(roomCode);
+      console.log(`[Room] Deleted waiting room ${roomCode} (creator left via leave-room).`);
+    } else if (room.status === "playing") {
+      // Game was in progress — mark it interrupted
+      room.status = "finished";
+      room.players[color] = { ...room.players[color], socketId: null };
+
+      const opponentColor = color === "R" ? "Y" : "R";
+      const opponentSocketId = room.players[opponentColor]?.socketId;
+
+      if (opponentSocketId) {
+        io.to(opponentSocketId).emit("player-disconnected", {
+          message: `${room.players[color]?.name ?? "Your opponent"} left the game.`,
+        });
+      }
+
+      console.log(`[Room] Player ${color} left active game ${roomCode} via leave-room.`);
+    } else {
+      // Room is finished — just remove the player's socket reference
+      room.players[color] = { ...room.players[color], socketId: null };
+      console.log(`[Room] Player ${color} left finished room ${roomCode}.`);
+    }
+
+    ack?.({ success: true });
+  });
+
+  // ── rematch-request ─────────────────────────────────────────────────────────
+  /**
+   * Client emits: { roomCode: string }
+   * Server acks:  { success, message? }
+   *
+   * Sends a rematch proposal to the opponent. Only valid when the game is finished
+   * and both players are still connected.
+   */
+  socket.on("rematch-request", ({ roomCode: rawCode } = {}, ack) => {
+    const roomCode = normaliseRoomCode(rawCode);
+    const room = roomCode ? rooms.get(roomCode) : null;
+
+    if (!room) {
+      return ack?.({ success: false, message: "Room not found." });
+    }
+
+    const color = getPlayerColor(room, socket.id);
+    if (!color) {
+      return ack?.({ success: false, message: "You are not in this room." });
+    }
+
+    if (room.status !== "finished") {
+      return ack?.({ success: false, message: "Game is not finished yet." });
+    }
+
+    // Notify the opponent
+    const opponentColor = color === "R" ? "Y" : "R";
+    const opponentSocketId = room.players[opponentColor]?.socketId;
+    const opponentConnected = opponentSocketId && io.sockets.sockets.has(opponentSocketId);
+
+    if (!opponentConnected) {
+      return ack?.({ success: false, message: "Opponent is no longer connected." });
+    }
+
+    io.to(opponentSocketId).emit("rematch-request", {
+      from: room.players[color]?.name ?? "Your opponent",
+    });
+
+    console.log(`[Room] ${color} requested rematch in ${roomCode}.`);
+    ack?.({ success: true });
+  });
+
+  // ── rematch-accepted ────────────────────────────────────────────────────────
+  /**
+   * Client emits: { roomCode: string }
+   * Server acks:  { success, message? }
+   *
+   * Accepts a rematch. Resets the board and starts a new game.
+   * The player who went second (Y) last time now goes first (gets R).
+   */
+  socket.on("rematch-accepted", ({ roomCode: rawCode } = {}, ack) => {
+    const roomCode = normaliseRoomCode(rawCode);
+    const room = roomCode ? rooms.get(roomCode) : null;
+
+    if (!room) {
+      return ack?.({ success: false, message: "Room not found." });
+    }
+
+    const color = getPlayerColor(room, socket.id);
+    if (!color) {
+      return ack?.({ success: false, message: "You are not in this room." });
+    }
+
+    if (room.status !== "finished") {
+      return ack?.({ success: false, message: "Game is not finished yet." });
+    }
+
+    // Verify both players are still connected
+    const rConnected = room.players.R?.socketId && io.sockets.sockets.has(room.players.R.socketId);
+    const yConnected = room.players.Y?.socketId && io.sockets.sockets.has(room.players.Y.socketId);
+
+    if (!rConnected || !yConnected) {
+      return ack?.({ success: false, message: "Both players must be connected for a rematch." });
+    }
+
+    // Swap colors for fairness: whoever was Y now becomes R (goes first)
+    const oldR = room.players.R;
+    const oldY = room.players.Y;
+    room.players.R = { socketId: oldY.socketId, name: oldY.name };
+    room.players.Y = { socketId: oldR.socketId, name: oldR.name };
+
+    // Reset game state
+    room.board = createBoard();
+    room.currentTurn = "R";
+    room.status = "playing";
+    room.winner = null;
+    room.winningCells = [];
+    room.totalMoves = 0;
+
+    console.log(`[Room] Rematch started in ${roomCode}. Colors swapped.`);
+
+    const userColor = getPlayerColor(room, socket.id);
+    ack?.({ success: true, color: userColor });
+
+    // Broadcast the fresh game state to both players
+    const state = buildPublicState(room);
+    io.to(roomCode).emit("room-updated", state);
+    io.to(roomCode).emit("game-state", state);
+
+    // Notify both players of their new color assignment directly
+    if (room.players.R?.socketId) {
+      io.to(room.players.R.socketId).emit("player-assigned", { color: "R" });
+    }
+    if (room.players.Y?.socketId) {
+      io.to(room.players.Y.socketId).emit("player-assigned", { color: "Y" });
+    }
+  });
+
   // ── disconnect ───────────────────────────────────────────────────────────────
   /**
    * Disconnect policy (documented):
@@ -355,8 +531,21 @@ io.on("connection", (socket) => {
         }
 
         console.log(`[Room] Player ${color} disconnected from active game ${roomCode}.`);
+      } else if (room.status === "finished") {
+        // Game was already finished — clear the disconnected player's socketId
+        room.players[color] = { ...room.players[color], socketId: null };
+
+        const opponentColor = color === "R" ? "Y" : "R";
+        const opponentSocketId = room.players[opponentColor]?.socketId;
+
+        if (opponentSocketId) {
+          io.to(opponentSocketId).emit("player-disconnected", {
+            message: `${room.players[color]?.name ?? "Your opponent"} disconnected.`,
+          });
+        }
+
+        console.log(`[Room] Player ${color} disconnected from finished game ${roomCode}.`);
       }
-      // If the room is already finished, no action needed
       break;
     }
   });
@@ -392,4 +581,8 @@ process.on("SIGTERM", async () => {
   process.exit(0);
 });
 
-start();
+if (process.env.NODE_ENV !== "test") {
+  start();
+}
+
+module.exports = { app, server, io, rooms, start };
